@@ -549,10 +549,19 @@ impl<V> Node<V> {
 
     /// remove the value at `key` and return it, merging the tree with its children
     /// if necessary.
+    ///
+    /// as with `get`, the key includes this node's label, so trees whose root carries
+    /// a non-empty label (e.g. the detached nodes returned by
+    /// [`split_by_prefix`](Node::split_by_prefix)) resolve keys the same way lookups do
     pub fn remove<K: ?Sized + BorrowedBytes>(&mut self, key: &K) -> Option<V> {
-        let key = key.as_bytes();
-        if key.is_empty() && self.label().is_empty() {
-            // we're at root node
+        let key = crate::strip_prefix(key.as_bytes(), self.label())?;
+        self.remove_suffix(key)
+    }
+
+    /// remove with `key` relative to the end of this node's label
+    fn remove_suffix(&mut self, key: &[u8]) -> Option<V> {
+        if key.is_empty() {
+            // key ends at this node
             return self.take_value();
         }
         let i = self.child_index_with_first(*key.first()?)?;
@@ -581,7 +590,7 @@ impl<V> Node<V> {
             val
         } else {
             // go deeper, recursively call remove on child with remaining
-            let val = child.remove(remaining);
+            let val = child.remove_suffix(remaining);
             child.try_merge_child();
             val
         }
@@ -2470,6 +2479,39 @@ mod tests {
         let mut root = create_bigger_test_tree();
         let other = root.split_by_prefix("xyx");
         assert_eq!(other, None);
+    }
+
+    #[test]
+    fn test_remove_on_labeled_root() {
+        // nodes returned by `split_by_prefix` carry the full prefix as their
+        // root label; `remove` must resolve keys the same way `get` does,
+        // i.e. including the node's own label
+        let mut root = Node::root();
+        root.insert("apple", 1);
+        root.insert("applesauce", 2);
+        root.insert("box", 3);
+
+        let mut detached = root.split_by_prefix("apple").unwrap();
+        assert_eq!(detached.label(), b"apple");
+
+        // a key shorter than the label is not in the tree
+        assert_eq!(detached.remove("app"), None);
+        assert_eq!(detached.remove("applesauce"), Some(2));
+        assert_eq!(detached.get("applesauce"), None);
+        assert_eq!(detached.remove("apple"), Some(1));
+        assert_eq!(detached.get("apple"), None);
+
+        // a child whose label repeats the root's label must not be mistaken
+        // for the root's own key
+        let mut root = Node::root();
+        root.insert("appleapple", 1);
+        root.insert("applebanana", 2);
+
+        let mut detached = root.split_by_prefix("apple").unwrap();
+        assert_eq!(detached.label(), b"apple");
+        assert_eq!(detached.remove("apple"), None);
+        assert_eq!(detached.get("appleapple"), Some(&1));
+        assert_eq!(detached.remove("appleapple"), Some(1));
     }
 
     #[test]
